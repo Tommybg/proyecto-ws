@@ -7,206 +7,92 @@ from typing import List, Dict, Any
 import streamlit as st
 from dotenv import load_dotenv
 
-from scraping.hybrid_scraper import (
-    get_popular_sites, 
-    scrape_popular_sites
-)
+from scraping.scraper import scrape_scholarship_pages
 from utils.openai_client import generate_markdown_summary
 
 load_dotenv()
 
-st.set_page_config(page_title="🎓 Buscador de Becas", page_icon="🎓", layout="wide")
+st.set_page_config(page_title="Scholarship Scraper", page_icon="🎓", layout="wide")
 
-# Barra lateral
+# Sidebar
 with st.sidebar:
-    st.title("🎓 Buscador de Becas")
-    st.caption("Busca becas en los sitios más populares")
-    
-    st.divider()
-    
-    # Selección de sitios populares
-    st.subheader("Sitios Populares")
-    popular_sites = get_popular_sites()
-    selected_sites = st.multiselect(
-        "Selecciona los sitios de becas a explorar:",
-        options=list(popular_sites.keys()),
-        default=list(popular_sites.keys())[:5],  # Seleccionar primeros 5 por defecto
-        help="Estos sitios tienen scrapers optimizados para mayor precisión"
+    st.title("🎓 Scholarship Scraper")
+    st.caption("Ingresa URLs (una por línea), luego ejecuta el scraping.")
+
+    urls_text = st.text_area(
+        label="URLs de becas (1 por línea)",
+        height=180,
+        placeholder="https://ejemplo1.com/beca\nhttps://ejemplo2.org/scholarship",
     )
-    
-    if selected_sites:
-        with st.expander("📍 Vista previa de URLs seleccionadas", expanded=False):
-            for site in selected_sites:
-                st.write(f"**{site}:** {popular_sites[site]}")
-    
-    # Configuraciones
-    st.subheader("⚙️ Configuración")
-    use_headless = st.toggle("Navegador invisible", value=True, help="Scraping más rápido sin interfaz del navegador")
-    max_pages = st.number_input("Límite de páginas (0=automático)", min_value=0, max_value=50, value=0)
-    
-    # Configuración OpenAI
+
+    use_headless = st.toggle("Usar navegador headless", value=True)
+    max_pages = st.number_input("Límite de páginas por sitio (0=auto)", min_value=0, max_value=50, value=0)
+
     default_api_key = os.getenv("OPENAI_API_KEY", "")
-    model = "gpt-4.1-2025-04-14"
-    
-    st.divider()
-    
-    # Botón de acción
-    run_button = st.button(
-        "🚀 Iniciar Búsqueda", 
-        type="primary", 
-        use_container_width=True,
-        help="Comenzar la búsqueda de becas y el resumen con IA"
+
+    model = st.selectbox(
+        "Modelo",
+        options=[
+            "gpt-4.1-2025-04-14",
+            "gpt-4.1-mini-2025-04-14",
+        ],
+        index=0,
     )
-# Área de contenido principal
-st.title("🎓 Resultados de Búsqueda de Becas")
+
+    run_button = st.button("🚀 Ejecutar scraping y resumen")
+
+st.title("Resultados de becas")
 
 if run_button:
-    # Validar selección de sitios
-    if not selected_sites:
-        st.warning("⚠️ Por favor selecciona al menos un sitio popular.")
+    urls = [u.strip() for u in urls_text.splitlines() if u.strip()]
+    if not urls:
+        st.warning("Por favor, ingresa al menos una URL.")
         st.stop()
-    
-    # Obtener URLs a procesar
-    popular_sites = get_popular_sites()
-    urls_to_process = [popular_sites[site] for site in selected_sites]
-    mode_description = f"Seleccionados {len(selected_sites)} sitios populares"
-    
-    # Validar clave API
+
     if not default_api_key:
-        st.error("🔑 Por favor configura OPENAI_API_KEY en tu archivo .env")
+        st.warning("Configura OPENAI_API_KEY en .env.")
         st.stop()
-        st.stop()
-    
-    # Seguimiento del progreso
-    progress_messages = []
-    error_info = None
-    
-    def progress_callback(message):
-        progress_messages.append(message)
-        return message
-    
-    # Ejecutar scraping
-    with st.status(f"🚀 Procesando {len(urls_to_process)} URLs...", expanded=True) as status:
-        st.write(f"📊 **{mode_description}**")
-        st.write(f"🔄 URLs a procesar: {len(urls_to_process)}")
-        
+
+    effective_api_key = default_api_key
+
+    with st.status("Ejecutando scraping...", expanded=True) as status:
+        st.write(f"Se recibieron {len(urls)} URL(s)")
         try:
             start = time.time()
-            
-            # Usar scraping de sitios populares
-            scholarships = scrape_popular_sites(
-                selected_sites=selected_sites,
+            scholarships = scrape_scholarship_pages(
+                urls=urls,
                 headless=use_headless,
-                progress_callback=progress_callback
+                max_pages=max_pages or None,
             )
-            
-            # Mostrar estadísticas de scraping
-            total_scholarships = len(scholarships)
-            tailored_count = sum(1 for s in scholarships if s.get('scraping_method') == 'tailored')
-            general_count = sum(1 for s in scholarships if s.get('scraping_method') == 'general')
-            
-            st.write(f"✅ **¡Scraping completado exitosamente!**")
-            st.write(f"🎯 Total de becas encontradas: **{total_scholarships}**")
-            st.write(f"📊 Scraping optimizado: **{tailored_count}** | Scraping general: **{general_count}**")
-            
-            if total_scholarships == 0:
-                st.warning("⚠️ No se encontraron becas. Esto puede deberse a:")
-                st.write("- Sitios que requieren login o tienen protección anti-bot")
-                st.write("- URLs que apuntan a páginas de búsqueda en lugar de becas específicas")
-                st.write("- Problemas temporales del sitio")
-                st.stop()
-            
-            status.update(label="🤖 Generando resumen con IA...", state="running")
-            
-            # Generar resumen con IA
+            st.write(f"Scraping completado. Se extrajeron {len(scholarships)} registros.")
+            status.update(label="Generando resumen con OpenAI...", state="running")
+
             markdown = generate_markdown_summary(
                 scholarships=scholarships,
-                openai_api_key=default_api_key
+                openai_api_key=effective_api_key,
+                model=model,
             )
-            
             elapsed = time.time() - start
-            status.update(label=f"✨ ¡Completado! ({elapsed:.1f}s total)", state="complete")
-            
+            status.update(label=f"Listo en {elapsed:0.1f}s", state="complete")
         except Exception as e:
-            status.update(label="❌ Error en el scraping", state="error")
-            st.error(f"**Ocurrió un error:** {str(e)}")
+            status.update(label="Falló el proceso", state="error")
+            st.exception(e)
             st.stop()
-    
-    # Mostrar información de depuración si hubo un error
-    if progress_messages:
-        with st.expander("🔍 Información de Depuración"):
-            st.write("**Mensajes de Progreso:**")
-            for msg in progress_messages:
-                st.write(f"- {msg}")
 
-    # Mostrar resultados
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.subheader("📝 Vista Previa del Reporte de Becas")
-    
-    with col2:
-        # Sección de descarga
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        file_name = f"becas_{timestamp}.md"
-        md_bytes = markdown.encode("utf-8")
-        
-        st.download_button(
-            label="💾 Descargar Reporte",
-            data=md_bytes,
-            file_name=file_name,
-            mime="text/markdown",
-            type="primary",
-            use_container_width=True,
-        )
-    
-    # Mostrar estadísticas detalladas
-    with st.expander("📊 Estadísticas de Scraping", expanded=False):
-        stat_col1, stat_col2, stat_col3 = st.columns(3)
-        
-        with stat_col1:
-            st.metric("Total de Becas", total_scholarships)
-            st.metric("URLs Procesadas", len(urls_to_process))
-        
-        with stat_col2:
-            st.metric("Scraping Optimizado", f"{tailored_count}/{total_scholarships}")
-            accuracy_rate = (tailored_count / total_scholarships * 100) if total_scholarships > 0 else 0
-            st.metric("Tasa de Precisión", f"{accuracy_rate:.1f}%")
-        
-        with stat_col3:
-            st.metric("Tiempo de Procesamiento", f"{elapsed:.1f}s")
-            avg_time = elapsed / len(urls_to_process) if urls_to_process else 0
-            st.metric("Tiempo Promedio/URL", f"{avg_time:.1f}s")
-        
-        # Mostrar desglose de scrapers
-        if scholarships:
-            st.write("**Uso de Scrapers:**")
-            scraper_stats = {}
-            for scholarship in scholarships:
-                scraper_type = scholarship.get('scraper_type', 'Desconocido')
-                scraper_stats[scraper_type] = scraper_stats.get(scraper_type, 0) + 1
-            
-            for scraper, count in scraper_stats.items():
-                st.write(f"- {scraper}: {count} becas")
-    
-    # Mostrar markdown principal
+    st.subheader("Vista previa del Markdown")
     st.markdown(markdown)
-    
-    # Vista de datos raw (opcional)
-    if st.checkbox("🔍 Mostrar Datos Raw (para depuración)"):
-        st.json(scholarships)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = f"becas_{timestamp}.md"
+    md_bytes = markdown.encode("utf-8")
+
+    st.download_button(
+        label="💾 Descargar Markdown",
+        data=md_bytes,
+        file_name=file_name,
+        mime="text/markdown",
+        use_container_width=True,
+    )
 
 else:
-    # Pantalla de bienvenida
-    st.markdown("""
-    ### 👋 ¡Bienvenido al Buscador de Becas!
-    
-    Esta herramienta te ayuda a encontrar y organizar oportunidades de becas usando scraping potenciado por IA.
-        
-    **🚀 Inicio Rápido:**
-    1. Selecciona los sitios populares en la barra lateral
-    2. Configura tu clave API de OpenAI en el archivo .env
-    3. Haz clic en "Iniciar Búsqueda"
-    
-    ---
-    """)
+    st.info("Ingresa URLs en el sidebar y presiona 'Ejecutar scraping y resumen'.")

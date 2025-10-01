@@ -4,6 +4,7 @@ import re
 import time
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse, urljoin
 
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -81,7 +82,8 @@ def _buscar_por_pistas(soup: BeautifulSoup, pistas: List[str]) -> str:
 
 
 def _mejor_titulo(soup: BeautifulSoup) -> str:
-    """Encuentra el mejor título en la página"""
+    """Encuentra el mejor título en la página""" 
+    # Recorre estos posibles selectores en orden de prioridad
     for selector in ["h1", "h2", "title", "meta[property='og:title']"]:
         el = soup.select_one(selector)
         if el:
@@ -92,7 +94,7 @@ def _mejor_titulo(soup: BeautifulSoup) -> str:
             texto = _extraer_texto(el)
             if len(texto) > 4:
                 return texto
-    # Alternativa: primer strong/bold
+    # Si no encuentra en h1, h2, title, meta[property='og:title'] usa strong/b
     for selector in ["strong", "b"]:
         el = soup.select_one(selector)
         if el:
@@ -103,4 +105,57 @@ def _mejor_titulo(soup: BeautifulSoup) -> str:
 
 
 # Alias en inglés para compatibilidad
-_build_driver = _construir_driver
+# _build_driver = _construir_driver
+
+
+def scrape_scholarship_pages(urls: List[str], headless: bool = True, max_pages: Optional[int] = None) -> List[Dict[str, Any]]:
+    """English entry point: scrape a list of scholarship pages and return dicts.
+
+    Note: max_pages is currently unused but reserved for future pagination support.
+    """
+    driver = _construir_driver(headless=headless)
+    wait = WebDriverWait(driver, 15)
+    results: List[Dict[str, Any]] = []
+
+    try:
+        for url in urls:
+            try:
+                driver.get(url)
+                wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                time.sleep(1.2)
+                html = driver.page_source
+                soup = BeautifulSoup(html, "lxml")
+
+                title = _mejor_titulo(soup)
+                coverage = _buscar_por_pistas(soup, PISTAS_COBERTURA)
+                location = _buscar_por_pistas(soup, PISTAS_UBICACION)
+                scholarship_type = _buscar_por_pistas(soup, PISTAS_TIPO)
+                amount = _adivinar_monto(soup.get_text(" ", strip=True))
+
+                # canónica o og:url
+                link_el = soup.select_one("link[rel='canonical'], meta[property='og:url']")
+                detail_url = link_el.get("href") if link_el and hasattr(link_el, 'attrs') and 'href' in link_el.attrs else url
+                if link_el and link_el.name == "meta":
+                    detail_url = link_el.get("content", url)
+
+                beca = Beca(
+                    title=title,
+                    location=location,
+                    coverage=coverage,
+                    amount=amount,
+                    type=scholarship_type,
+                    url=detail_url,
+                    source_url=url,
+                )
+                results.append(asdict(beca))
+            except Exception:
+                continue
+    finally:
+        driver.quit()
+
+    return results
+
+
+
+# def raspar_paginas_becas(urls: List[str], headless: bool = True, max_pages: Optional[int] = None) -> List[Dict[str, Any]]:
+#     return scrape_scholarship_pages(urls=urls, headless=headless, max_pages=max_pages)
