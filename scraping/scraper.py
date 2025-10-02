@@ -15,6 +15,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 
+#import de scraper especifico para DAAD
+from scraping_esp.wscraper_daad import scrape_daad_scholarships
 
 @dataclass
 class Beca:
@@ -153,9 +155,103 @@ def scrape_scholarship_pages(urls: List[str], headless: bool = True, max_pages: 
     finally:
         driver.quit()
 
-    return results
+    # --- Llamada e Integración del Scraper Especializado (DAAD) ---
+    
+    try:
+        print("\n--- Integrando resultados del Scraper DAAD ---")
+        # Llamar a la función encapsulada en wscraper_daad.py
+        resultados_daad = scrape_daad_scholarships(headless=headless)
+        
+        # Fusión: Añadir los elementos de la segunda lista a la primera
+        results.extend(resultados_daad)
+        
+    except Exception as e:
+        # Captura errores que impidan la ejecución del scraper de DAAD
+        print(f"❌ Error grave al integrar el scraper de DAAD: {e}. Los resultados genéricos se mantienen.")
+        
+    print(f"✅ Proceso completado. Total de becas recolectadas: {len(results)}")
 
+    return results
 
 
 # def raspar_paginas_becas(urls: List[str], headless: bool = True, max_pages: Optional[int] = None) -> List[Dict[str, Any]]:
 #     return scrape_scholarship_pages(urls=urls, headless=headless, max_pages=max_pages)
+
+
+
+
+# ==============================================================================
+# 2. DATOS DE PRUEBA
+# ==============================================================================
+# URLs de ejemplo. Solo se necesitan para el scraper genérico.
+# La lógica de DAAD iniciará su propio rastreo desde su URL fija.
+URLS_DE_PRUEBA_GENERICAS = [
+    "https://www.aauw.org/resources/programs/fellowships-grants/",  # URL de prueba 1
+    "https://research.adobe.com/scholarship/",  # URL de prueba 2
+]
+# Nota: La URL de DAAD se llama internamente, por lo que no la incluimos aquí.
+
+# ==============================================================================
+# 3. EJECUCIÓN DE LA PRUEBA
+# ==============================================================================
+
+def run_test():
+    """Ejecuta el scraper principal y verifica los resultados."""
+    print("==================================================")
+    print(" INICIANDO PRUEBA DEL SCRAPER INTEGRADO")
+    print("==================================================")
+    
+    # Ejecuta el scraper, activando tanto la lógica genérica como la de DAAD
+    try:
+        # Usamos headless=False (opcional) para ver el navegador si hay fallos,
+        # pero True es mejor para producción.
+        resultados_finales: List[Dict[str, Any]] = scrape_scholarship_pages(
+            urls=URLS_DE_PRUEBA_GENERICAS, 
+            headless=True # Cambia a False si quieres ver el navegador (solo para debug)
+        )
+    except Exception as e:
+        print(f"\n❌ ERROR CRÍTICO durante la ejecución de scrape_scholarship_pages: {e}")
+        return
+
+    # --- Verificación de Resultados ---
+    print("\n==================================================")
+    print(f"✅ VERIFICACIÓN DE RESULTADOS FINALES")
+    print(f"Total de Becas Recolectadas: {len(resultados_finales)}")
+    print("==================================================")
+
+    if not resultados_finales:
+        print("⚠️ Advertencia: No se pudo recolectar ninguna beca. Verifica tu conexión, el driver de Chrome y los selectores.")
+        return
+
+    # 1. Verificar el formato de las becas (la primera entrada)
+    beca_ejemplo = resultados_finales[0]
+    campos_esperados = ['title', 'location', 'coverage', 'amount', 'type', 'url', 'source_url']
+    
+    print("\n--- Verificando Formato (1ra Beca) ---")
+    formato_ok = all(campo in beca_ejemplo for campo in campos_esperados)
+    print(f"Formato de datos correcto (contiene {campos_esperados}): {'✅ SÍ' if formato_ok else '❌ NO'}")
+
+    if not formato_ok:
+        print(f"Campos encontrados: {list(beca_ejemplo.keys())}")
+
+    # 2. Imprimir ejemplos para inspección
+    print("\n--- Ejemplos de Salida ---")
+    for i, res in enumerate(resultados_finales[:5]):
+        print(f"[{i+1}] Título: {res.get('title', 'N/A')}")
+        print(f"    URL: {res.get('url', 'N/A')}")
+        print(f"    Monto: {res.get('amount', 'N/A')}")
+        print(f"    Fuente: {res.get('source_url', 'N/A')}")
+        print("-" * 30)
+
+    # 3. Verificación Heurística de Integración (Opcional)
+    # Busca un resultado que probablemente venga del scraper de DAAD
+    daad_source = [r for r in resultados_finales if 'daad.de' in r.get('url', '').lower()]
+    print(f"\n--- Verificando Integración DAAD ---")
+    print(f"Resultados de DAAD encontrados: {'✅ SÍ' if daad_source else '❌ NO'}")
+    if daad_source:
+        print(f"Ejemplo de beca DAAD: {daad_source[0]['title']}")
+        print(f"URL DAAD: {daad_source[0]['url']}")
+
+
+if __name__ == '__main__':
+    run_test()
