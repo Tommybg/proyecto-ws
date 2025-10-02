@@ -178,7 +178,7 @@ def scrape_scholarship_pages(urls: List[str], headless: bool = True, max_pages: 
 #     return scrape_scholarship_pages(urls=urls, headless=headless, max_pages=max_pages)
 
 
-
+"""
 
 # ==============================================================================
 # 2. DATOS DE PRUEBA
@@ -196,7 +196,7 @@ URLS_DE_PRUEBA_GENERICAS = [
 # ==============================================================================
 
 def run_test():
-    """Ejecuta el scraper principal y verifica los resultados."""
+    #Ejecuta el scraper principal y verifica los resultados.
     print("==================================================")
     print(" INICIANDO PRUEBA DEL SCRAPER INTEGRADO")
     print("==================================================")
@@ -255,3 +255,4 @@ def run_test():
 
 if __name__ == '__main__':
     run_test()
+"""
