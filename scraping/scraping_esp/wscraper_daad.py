@@ -1,22 +1,17 @@
 import time
 import re
-from typing import List, Dict, Union, Set, Tuple, Any
+from typing import List, Dict, Any
 from urllib.parse import urljoin, urlparse
-from collections import defaultdict
 from dataclasses import dataclass, asdict
 
-import requests
-from requests.exceptions import RequestException
+from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
-from bs4 import BeautifulSoup, Tag 
 
-# ==============================================================================
 # 1. DEFINICIONES DE CLASE Y CONSTANTES
-# ==============================================================================
 
 @dataclass
 class Beca:
@@ -29,277 +24,315 @@ class Beca:
     url: str         # URL de detalles
     source_url: str  # URL origen
 
-# Palabras clave para inferir el mapeo de H3 a variable (para el mapeo dinámico)
-MAPPING_KEYWORDS = {
-    'coverage_amount': ['value', 'amount', 'stipend', 'financ', 'benefit', 'sum'],
-    'type_description': ['programme', 'target', 'group', 'field', 'study', 'who can apply'],
-    'requirements': ['require', 'academic', 'application', 'docum'],
-    'location_details': ['where', 'country', 'locat', 'city']
-}
-
 DAAD_STARTING_URL = "https://www2.daad.de/deutschland/stipendium/datenbank/en/21148-scholarship-database/"
 
 
-# ==============================================================================
-# 2. CLASE DE RASTREO ESPECIALIZADA (LÓGICA OPTIMIZADA)
-# ==============================================================================
+
+# 2. CLASE DE RASTREO ESPECIALIZADA DAAD
 
 class DAADScraper:
-    """Clase especializada para rastreo y extracción de DAAD con mapeo dinámico."""
+    """Scraper simple y robusto para becas DAAD."""
 
-    def __init__(self, start_url: str, max_links: int, wait_time: int, sleep_time: float, headless: bool):
+    def __init__(self, start_url: str, max_pages: int, wait_time: int, sleep_time: float, headless: bool):
         self.start_url = start_url
-        self.max_links = max_links
+        self.max_pages = max_pages
         self.wait_time = wait_time
         self.sleep_time = sleep_time
         self.headless = headless
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
         self.driver = None
-        self.h3_frecuencias = defaultdict(int)
-        self.h3_mappeo_dinamico = {}
 
     def _init_driver(self):
-        """Inicializa el driver de Selenium."""
+        """Inicializa el driver de Chrome."""
         options = webdriver.ChromeOptions()
-        if self.headless: options.add_argument('--headless')
+        if self.headless:
+            options.add_argument('--headless=new')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
-        options.add_argument(f'user-agent={self.headers["User-Agent"]}')
+        options.add_argument('--window-size=1920,1080')
         try:
             self.driver = webdriver.Chrome(options=options)
             self.driver.set_page_load_timeout(30)
         except WebDriverException as e:
-            # Re-lanza la excepción para que el llamador pueda manejar la falta del driver
-            raise WebDriverException(f"Error al iniciar el driver de Chrome: {e}. Asegúrate del driver.")
+            raise WebDriverException(f"Error al iniciar el driver de Chrome: {e}")
 
     def _quit_driver(self):
-        """Cierra el driver de Selenium si está inicializado."""
-        if self.driver: self.driver.quit(); self.driver = None
+        """Cierra el driver si está inicializado."""
+        if self.driver:
+            self.driver.quit()
+            self.driver = None
 
-    # --- Etapa 1: Rastreo de Enlaces (Selenium) ---
-    def scrape_links(self) -> List[str]:
-        """Rastrea todas las páginas y extrae enlaces."""
-        all_links: Set[str] = set()
-        current_url: str = self.start_url
+    def scrape_scholarships(self) -> List[Dict[str, Any]]:
+        """Método principal de scraping con paginación."""
+        results: List[Dict[str, Any]] = []
+        
         try:
             self._init_driver()
-            while current_url and len(all_links) < self.max_links:
+            
+            current_page = 1
+            current_url = self.start_url
+            
+            while current_page <= self.max_pages and current_url:
+                print(f"[DAAD] Scraping page {current_page}")
+                
                 self.driver.get(current_url)
+                
+                # Esperar a que cargue el contenido (buscar lista de resultados)
                 try:
                     WebDriverWait(self.driver, self.wait_time).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, '.entry'))
+                        EC.presence_of_element_located((By.CSS_SELECTOR, 'ul.resultlist'))
                     )
-                except TimeoutException: break
+                    time.sleep(2)  # Espera extra para contenido dinámico
+                except TimeoutException:
+                    print(f"[DAAD] Timeout waiting for content on page {current_page}")
+                    break
                 
-                entries = self.driver.find_elements(By.CSS_SELECTOR, '.entry a')
-                for entry in entries:
-                    link = entry.get_attribute('href')
-                    absolute_link = urljoin(current_url, link) 
-                    parsed_link = urlparse(absolute_link)._replace(fragment="").geturl()
-                    if parsed_link and parsed_link not in all_links:
-                        all_links.add(parsed_link)
-                        if len(all_links) >= self.max_links: break 
-                if len(all_links) >= self.max_links: break
+                # Obtener HTML de la página
+                html = self.driver.page_source
+                soup = BeautifulSoup(html, 'html.parser')
                 
-                try:
-                    next_button = self.driver.find_element(
-                        By.XPATH, 
-                        "//a[contains(text(), 'Next') or contains(text(), '»') or contains(@class, 'next')]"
-                    )
-                    next_page_link = next_button.get_attribute('href')
-                    if next_page_link:
-                        next_page_link = urljoin(current_url, next_page_link)
-                        next_page_link_normalized = urlparse(next_page_link)._replace(fragment="").geturl()
-                        if next_page_link_normalized != urlparse(current_url)._replace(fragment="").geturl():
-                            current_url = next_page_link_normalized
-                        else: break
-                    else: break 
-                except NoSuchElementException: break
-                except Exception: break
+                # Extraer enlaces de becas de la página actual
+                scholarship_links = self._extract_scholarship_links(soup)
+                if not scholarship_links:
+                    print(f"[DAAD] No scholarship links found on page {current_page}")
+                    break
+                
+                print(f"[DAAD] Found {len(scholarship_links)} scholarship links on page {current_page}")
+                
+                # Visitar cada página de detalle de beca
+                for link in scholarship_links:
+                    scholarship_data = self._scrape_scholarship_detail(link)
+                    if scholarship_data and scholarship_data.get('title'):
+                        results.append(scholarship_data)
+                    time.sleep(self.sleep_time)
+                
+                print(f"[DAAD] Extracted {len([r for r in results if r.get('title')])} valid scholarships from page {current_page}")
+                
+                # Intentar navegar a la siguiente página
+                if current_page < self.max_pages:
+                    try:
+                        next_button = self.driver.find_element(
+                            By.XPATH, 
+                            "//a[contains(text(), 'Next') or contains(text(), '»') or contains(@class, 'next')]"
+                        )
+                        next_page_link = next_button.get_attribute('href')
+                        if next_page_link:
+                            next_page_link = urljoin(current_url, next_page_link)
+                            next_page_link_normalized = urlparse(next_page_link)._replace(fragment="").geturl()
+                            if next_page_link_normalized != urlparse(current_url)._replace(fragment="").geturl():
+                                current_url = next_page_link_normalized
+                                current_page += 1
+                            else:
+                                print(f"[DAAD] Next page link is same as current, stopping")
+                                break
+                        else:
+                            print(f"[DAAD] No next page link found")
+                            break
+                    except NoSuchElementException:
+                        print(f"[DAAD] No more pages available")
+                        break
+                    except Exception as e:
+                        print(f"[DAAD] Error navigating to next page: {e}")
+                        break
+                else:
+                    break
+                    
+        except Exception as e:
+            print(f"[DAAD] Error during scraping: {e}")
         finally:
             self._quit_driver()
-        return list(all_links)
-
-    # --- Etapa 2: Descarga de Contenido (Requests) ---
-    def fetch_body_content(self, links: List[str]) -> List[Dict[str, Union[str, int]]]:
-        """Realiza peticiones GET y extrae el contenido del <body>."""
-        lista_de_bodys: List[Dict[str, Union[str, int]]] = []
-        for link in links:
-            resultado: Dict[str, Union[str, int]] = {'url': link, 'source_url': link} 
-            try:
-                response = requests.get(link, headers=self.headers, timeout=15)
-                if response.status_code == 200:
-                    resultado['status_code'] = 200
-                    text = response.text
-                    body_match = re.search(r'<body.*?>', text, re.IGNORECASE | re.DOTALL)
-                    body_end_match = re.search(r'</body>', text, re.IGNORECASE | re.DOTALL)
-                    if body_match and body_end_match:
-                        resultado['body_html'] = text[body_match.start():body_end_match.end()]
-                    else:
-                        resultado['body_html'] = text
-                else: resultado['status_code'] = response.status_code
-            except RequestException: pass
-            lista_de_bodys.append(resultado)
-            time.sleep(self.sleep_time)
-        return lista_de_bodys
-
-    # --- Etapa 3: Análisis Estructural y Generación de Mapeo Dinámico ---
-    def _analizar_estructura_y_h3_frecuencias(self, lista_de_bodys: List[Dict]) -> int:
-        total_urls_analizadas = 0
-        for item in lista_de_bodys:
-            if item.get('status_code') != 200 or 'body_html' not in item: continue
-            try:
-                soup = BeautifulSoup(item['body_html'], 'html.parser')
-                contenedor_raiz = soup.find('div', class_='stipdb-detail')
-                if not contenedor_raiz: continue
-                total_urls_analizadas += 1
-                h3_secciones = [
-                    h.text.strip() for h in contenedor_raiz.find_all('h3') 
-                    if 'print-only' not in h.get('class', [])
-                ]
-                for h3_titulo in h3_secciones:
-                    self.h3_frecuencias[h3_titulo.lower().strip()] += 1
-            except Exception: pass
-        return total_urls_analizadas
         
-    def _generar_mapeo_dinamico(self, total_urls_analizadas: int):
-        if total_urls_analizadas == 0: return
-        umbral_minimo = total_urls_analizadas * 0.2
-        self.h3_mappeo_dinamico = {}
-        h3_comunes = sorted(self.h3_frecuencias.items(), key=lambda item: item[1], reverse=True)
-        for h3_normalized, conteo in h3_comunes:
-            if conteo < umbral_minimo: continue 
-            for variable, keywords in MAPPING_KEYWORDS.items():
-                if any(keyword in h3_normalized for keyword in keywords):
-                    if h3_normalized not in self.h3_mappeo_dinamico:
-                         self.h3_mappeo_dinamico[h3_normalized] = variable
-                         break 
+        return results
 
-    # --- Etapa 4: Extracción Final de Variables ---
-    def extraer_contenido_h3(self, h3_tag: Tag) -> str:
-        contenido = []
-        for sibling in h3_tag.find_next_siblings():
-            if sibling.name == 'h3': break
-            if sibling.name in ['p', 'ul', 'ol', 'div']:
-                if sibling.get('class') and any(cls in sibling['class'] for cls in ['footer', 'sidebar', 'nav']): continue
-                contenido.append(sibling.get_text(separator=' ', strip=True))
-            if len(contenido) > 5: break
-        return " ".join(contenido).strip()
+    def _extract_scholarship_links(self, soup: BeautifulSoup) -> List[str]:
+        """Extraer enlaces de detalle de becas de la página actual."""
+        links = []
+        # Buscar la lista de resultados
+        result_list = soup.find('ul', class_='resultlist')
+        
+        if not result_list:
+            print("[DAAD] No se encontró ul.resultlist")
+            return links
+        
+        # Buscar todos los elementos li con clase 'entry'
+        entries = result_list.find_all('li', class_='entry')
+        print(f"[DAAD] Found {len(entries)} li.entry elements")
+        
+        for entry in entries:
+            # El enlace está dentro del h2 > a
+            h2 = entry.find('h2')
+            if h2:
+                link_element = h2.find('a')
+                if link_element:
+                    href = link_element.get('href')
+                    if href:
+                        absolute_link = urljoin(self.start_url, href)
+                        parsed_link = urlparse(absolute_link)._replace(fragment="").geturl()
+                        if parsed_link:
+                            links.append(parsed_link)
+        
+        return links
 
-    def extraer_variables_de_body(self, item: Dict) -> Dict:
-        url = item['url']
-        extracted_data = {
-            'title': 'N/A', 'location': 'Germany', 'coverage': 'N/A', 'amount': 'N/A', 
-            'type': 'N/A', 'url': url, 'source_url': item.get('source_url', url), 
-            'raw_h3_data': {} 
+    def _scrape_scholarship_detail(self, url: str) -> Dict[str, Any]:
+        """Extraer datos de una página individual de detalle de beca."""
+        data = {
+            'title': 'N/A',
+            'location': 'Germany',
+            'coverage': '',
+            'amount': 'N/A',
+            'type': 'N/A',
+            'url': url,
+            'source_url': self.start_url
         }
-
-        if item.get('status_code') != 200 or 'body_html' not in item:
-            extracted_data['error'] = item.get('error', 'Contenido faltante/Error de red.')
-            return extracted_data
-
+        
         try:
-            soup = BeautifulSoup(item['body_html'], 'html.parser')
-            h2_title_tag = soup.find('h2', class_='title')
-            if h2_title_tag: extracted_data['title'] = h2_title_tag.text.strip()
+            self.driver.get(url)
             
-            contenedor_raiz = soup.find('div', class_='stipdb-detail')
-            if not contenedor_raiz:
-                extracted_data['error'] = 'Contenedor stipdb-detail no encontrado.'
-                return extracted_data
+            # Esperar a que cargue el contenido
+            try:
+                WebDriverWait(self.driver, self.wait_time).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, 'stipdb-detail'))
+                )
+            except TimeoutException:
+                print(f"[DAAD] Timeout loading detail page: {url}")
+                return data
             
-            h3_tags = [h for h in contenedor_raiz.find_all('h3') if 'print-only' not in h.get('class', [])]
-            for h3 in h3_tags:
-                h3_normalized = h3.text.strip().lower()
-                if h3_normalized in self.h3_mappeo_dinamico:
-                    campo_destino = self.h3_mappeo_dinamico[h3_normalized]
-                    contenido = self.extraer_contenido_h3(h3)
-                    if contenido:
-                        current_data = extracted_data['raw_h3_data'].setdefault(campo_destino, "")
-                        extracted_data['raw_h3_data'][campo_destino] = (current_data + " " + contenido).strip()
-
-            raw_data = extracted_data['raw_h3_data']
-            if 'coverage_amount' in raw_data:
-                full_text = raw_data['coverage_amount']
-                if re.search(r'[\d,\.]+\s*(?:€|\$|Euro|US\$|GBP)', full_text, re.IGNORECASE):
-                    extracted_data['amount'] = full_text
-                    extracted_data['coverage'] = full_text
-                else: extracted_data['coverage'] = full_text
-            if 'type_description' in raw_data:
-                extracted_data['type'] = raw_data['type_description']
-                
-            del extracted_data['raw_h3_data']
-            return extracted_data
+            # Obtener HTML de la página
+            html = self.driver.page_source
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Extraer datos de la beca
+            return self._extract_scholarship_data(soup, data)
+            
         except Exception as e:
-            extracted_data['error'] = f"Error en la extracción: {e}"
-            return extracted_data
+            print(f"[DAAD] Error scraping detail page {url}: {e}")
+            return data
 
-# ==============================================================================
-# 3. FUNCIÓN DE UTILIDAD PARA INTEGRACIÓN (PUNTO DE ENTRADA EXTERNO)
-# ==============================================================================
+    def _extract_scholarship_data(self, soup: BeautifulSoup, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extraer datos de beca de la página de detalle usando selectores simples."""
+        
+        # Extraer título
+        title_elem = soup.find('h2', class_='title')
+        if title_elem:
+            data['title'] = title_elem.get_text(strip=True)
+        
+        # Encontrar el contenedor principal de contenido
+        detail_container = soup.find('div', class_='stipdb-detail')
+        if not detail_container:
+            return data
+        
+        # Extraer información de las secciones H3 usando coincidencia simple de palabras clave
+        h3_elements = detail_container.find_all('h3')
+        
+        coverage_parts = []
+        
+        for h3 in h3_elements:
+            if 'print-only' in h3.get('class', []):
+                continue
+                
+            h3_text = h3.get_text(strip=True).lower()
+            
+            # Obtener contenido después de este H3 hasta el siguiente H3
+            content = self._get_content_after_h3(h3)
+            
+            if content:
+                # Buscar información de monto/financiera
+                if any(keyword in h3_text for keyword in ['value', 'amount', 'stipend', 'benefit', 'sum', 'financial']):
+                    # Buscar valores monetarios
+                    money_match = re.search(r'[\d,\.]+\s*(?:€|\$|Euro|US\$|GBP|EUR)', content, re.IGNORECASE)
+                    if money_match:
+                        data['amount'] = money_match.group(0)
+                    coverage_parts.append(f"Amount: {content[:100]}")
+                
+                # Buscar información de programa/tipo
+                elif any(keyword in h3_text for keyword in ['programme', 'target', 'field', 'study', 'who can apply']):
+                    data['type'] = content[:150]
+                
+                # Buscar requisitos
+                elif any(keyword in h3_text for keyword in ['require', 'academic', 'application']):
+                    coverage_parts.append(f"Requirements: {content[:100]}")
+                
+                # Buscar detalles de ubicación (aunque por defecto es Alemania)
+                elif any(keyword in h3_text for keyword in ['where', 'country', 'location']):
+                    if 'germany' not in content.lower():
+                        data['location'] = content[:50]
+                
+                # Agregar otra información relevante a cobertura
+                elif len(content) > 20:
+                    coverage_parts.append(f"{h3_text.title()}: {content[:100]}")
+        
+        # Combinar información de cobertura
+        if coverage_parts:
+            data['coverage'] = ' | '.join(coverage_parts[:3])  # Limitar a las primeras 3 partes
+        elif data['amount'] != 'N/A':
+            data['coverage'] = data['amount']
+        
+        return data
+    
+    def _get_content_after_h3(self, h3_element) -> str:
+        """Obtener contenido de texto después del elemento H3 hasta el siguiente H3."""
+        content_parts = []
+        
+        for sibling in h3_element.find_next_siblings():
+            if sibling.name == 'h3':
+                break
+            if sibling.name in ['p', 'ul', 'ol', 'div']:
+                # Omitir elementos de navegación y pie de página
+                if sibling.get('class') and any(cls in sibling.get('class', []) for cls in ['footer', 'sidebar', 'nav']):
+                    continue
+                text = sibling.get_text(separator=' ', strip=True)
+                if text:
+                    content_parts.append(text)
+            if len(content_parts) >= 3:  # Limitar extracción de contenido
+                break
+        
+        return ' '.join(content_parts).strip()
 
-def scrape_daad_scholarships(headless: bool = True) -> List[Dict[str, Any]]:
-    """
-    Ejecuta el proceso completo de DAADScraper (rastreo, análisis, extracción) 
-    y retorna los resultados como una lista de diccionarios Beca.
+
+# 3. FUNCIÓN DE UTILIDAD PARA INTEGRACIÓN 
+
+
+def scrape_daad_scholarships(headless: bool = True, max_pages: int = 3) -> List[Dict[str, Any]]:
+    """Ejecuta el proceso completo de scraping DAAD y retorna resultados como diccionarios Beca.
+    
+    Args:
+        headless: Si ejecutar el navegador en modo headless
+        max_pages: Máximo número de páginas a extraer
+        
+    Returns:
+        Lista de diccionarios de becas
     """
     
-    max_links = 120 
-    sleep_time = 0.5 
-
     scraper = DAADScraper(
-        start_url=DAAD_STARTING_URL, 
-        max_links=max_links, 
-        wait_time=10, 
-        sleep_time=sleep_time, 
+        start_url=DAAD_STARTING_URL,
+        max_pages=max_pages,
+        wait_time=10,
+        sleep_time=0.5,
         headless=headless
     )
     
-    print("\n[DAAD] Iniciando rastreo y extracción especializada.")
+    print(f"[DAAD] Starting scraping with max_pages={max_pages}")
     
     try:
-        links = scraper.scrape_links()
-        if not links: return []
-
-        lista_de_bodys = scraper.fetch_body_content(links)
+        results = scraper.scrape_scholarships()
         
-        total_analizadas = scraper._analizar_estructura_y_h3_frecuencias(lista_de_bodys)
-        scraper._generar_mapeo_dinamico(total_analizadas)
-
-        resultados_extraccion: List[Dict[str, Any]] = []
-        for item in lista_de_bodys:
-            data = scraper.extraer_variables_de_body(item)
-            
-            if 'error' not in data:
-                # Mapear los datos extraídos a la clase Beca y luego a dict
-                beca = Beca(
-                    title=data['title'],
-                    location=data['location'],
-                    coverage=data['coverage'],
-                    amount=data['amount'],
-                    type=data['type'],
-                    url=data['url'],
-                    source_url=data['source_url'],
-                )
-                resultados_extraccion.append(asdict(beca))
+        # Convertir al formato Beca
+        beca_results: List[Dict[str, Any]] = []
+        for data in results:
+            beca = Beca(
+                title=data.get('title', 'N/A'),
+                location=data.get('location', 'Germany'),
+                coverage=data.get('coverage', 'N/A'),
+                amount=data.get('amount', 'N/A'),
+                type=data.get('type', 'N/A'),
+                url=data.get('url', ''),
+                source_url=data.get('source_url', DAAD_STARTING_URL)
+            )
+            beca_results.append(asdict(beca))
         
-        print(f"[DAAD] Proceso especializado finalizado. Becas extraídas: {len(resultados_extraccion)}")
-        return resultados_extraccion
+        print(f"[DAAD] Scraping completed. Found {len(beca_results)} scholarships")
+        return beca_results
         
-    except WebDriverException as e:
-        print(f"[DAAD] ❌ Error de Selenium (Driver no encontrado/fallo): {e}")
-        return []
     except Exception as e:
-        print(f"[DAAD] ❌ Error grave en el scraper de DAAD: {e}")
+        print(f"[DAAD] Error in scraping: {e}")
         return []
 
-# ==============================================================================
-# EJECUCIÓN DE PRUEBA (OPCIONAL)
-# ==============================================================================
-"""if __name__ == '__main__':
-    print("--- PRUEBA DEL MÓDULO WSCRAPER_DAAD.PY ---")
-    resultados_daad = scrape_daad_scholarships(headless=True)
-    if resultados_daad:
-        print(f"Total: {len(resultados_daad)}. Ejemplo: {resultados_daad}")"""
